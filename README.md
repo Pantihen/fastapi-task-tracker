@@ -10,11 +10,11 @@
 
 | | |
 |---|---|
-| Приложение | **PUBLIC_URL** |
-| Swagger UI | PUBLIC_URL/docs |
-| Health-check | PUBLIC_URL/health |
-| Репозиторий | REPO_URL |
-| CI (GitHub Actions) | REPO_URL/actions |
+| Приложение | **https://task-tracker-production-a4f9c33d.up.railway.app** |
+| Swagger UI | https://task-tracker-production-a4f9c33d.up.railway.app/docs |
+| Health-check | https://task-tracker-production-a4f9c33d.up.railway.app/health |
+| Репозиторий | https://github.com/Pantihen/fastapi-task-tracker |
+| CI (GitHub Actions) | https://github.com/Pantihen/fastapi-task-tracker/actions |
 
 ## Стек
 
@@ -236,26 +236,37 @@ TEST_DATABASE_URL=postgresql+psycopg://user:pass@localhost:5432/test_db pytest
 
 ## Деплой (Railway)
 
+Приложение работает на Railway: **https://task-tracker-production-a4f9c33d.up.railway.app**
+
 | Сервис Railway | Аналог в compose |
 |---|---|
-| приложение из `Dockerfile` | `app` + `worker` (в одном контейнере: `scripts/start-web-and-worker.sh`) |
-| PostgreSQL | `db` |
-| Redis | `redis` |
+| `task-tracker`: образ из `Dockerfile` этого репозитория | `app` + `worker` (в одном контейнере: `scripts/start-web-and-worker.sh`) |
+| PostgreSQL | `db`; у приложения отдельная база `task_tracker` |
+| Redis | `redis`; Celery использует базы Redis 2 и 3 |
 
-Переменные приложения ссылаются на внутренние адреса сервисов Railway:
+На бесплатном плане Railway число сервисов ограничено, поэтому PostgreSQL и Redis общие с другим
+учебным проектом. Изоляция от него такая:
+- в PostgreSQL у этого приложения отдельная **база** `task_tracker`. Её при первом старте создаёт `scripts/ensure_database.py`, дальше схему ведёт Alembic;
+- в Redis у Celery отдельные **номера баз** (`CELERY_BROKER_DB=2`, `CELERY_RESULT_DB=3`);
+- воркер запускается с `--without-gossip --without-mingle --without-heartbeat` и не обменивается служебными сообщениями с чужими воркерами.
+
+Переменные приложения ссылаются на **внутренние адреса** сервисов Railway, а не на localhost:
 
 ```env
-DATABASE_URL=${{Postgres.DATABASE_URL}}
-REDIS_URL=${{Redis.REDIS_URL}}
+DATABASE_URL=postgresql://${{fastapi-db.PGUSER}}:${{fastapi-db.PGPASSWORD}}@${{fastapi-db.PGHOST}}:${{fastapi-db.PGPORT}}/task_tracker
+REDIS_URL=${{Redis.REDIS_URL}}          # → redis://...@redis.railway.internal:6379
+CELERY_BROKER_DB=2
+CELERY_RESULT_DB=3
 PORT=8000
 CORS_ORIGINS=http://localhost:3000,https://${{RAILWAY_PUBLIC_DOMAIN}}
 SECRET_KEY=<случайная строка>
 ADMIN_EMAIL=admin@example.com
-ADMIN_PASSWORD=<задан в Railway>
+ADMIN_PASSWORD=<задан в Railway, в репозитории его нет>
 ```
 
-Команда запуска: `sh scripts/start-web-and-worker.sh` (`alembic upgrade head`, затем Celery-воркер и uvicorn).
-Healthcheck: `/health`.
+- Команда запуска: `sh scripts/start-web-and-worker.sh` (создание базы → `alembic upgrade head` → Celery-воркер + uvicorn).
+- Healthcheck: `/health`.
+- Каждый push в `main` запускает CI и автодеплой.
 
 ## Демонстрация через /docs
 
