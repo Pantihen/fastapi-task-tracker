@@ -4,6 +4,8 @@
 # В docker compose воркер — отдельный сервис, этот скрипт там не используется.
 set -e
 
+# отдельная база на общем сервере PostgreSQL создаётся при первом запуске
+python -m scripts.ensure_database
 alembic upgrade head
 
 # --pool=solo — один процесс, минимум памяти
