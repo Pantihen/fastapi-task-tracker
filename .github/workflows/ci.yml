@@ -1,0 +1,99 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: migrations + pytest (PostgreSQL)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test_db
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U test -d test_db"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/test_db
+      TEST_DATABASE_URL: postgresql+psycopg://test:test@localhost:5432/test_db
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: "Alembic: upgrade head"
+        run: alembic upgrade head
+
+      - name: "Alembic: models match migrations"
+        run: alembic check
+
+      - name: "Alembic: downgrade base (миграции откатываются)"
+        run: alembic downgrade base
+
+      - name: Run tests
+        run: pytest -v
+
+  docker:
+    name: docker compose up --build (e2e)
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build and start app, worker, PostgreSQL, Redis
+        run: docker compose up -d --build --wait --wait-timeout 180
+
+      - name: Health (app + PostgreSQL + Redis)
+        run: |
+          curl -fsS http://localhost:8000/health | tee health.json
+          grep -q '"database":"ok"' health.json
+          grep -q '"redis":"ok"' health.json
+
+      - name: "E2E: задача с исполнителем → уведомление от Celery-воркера"
+        run: |
+          set -e
+          B=http://localhost:8000
+          json() { python3 -c "import sys,json; print(json.load(sys.stdin)$1)"; }
+          curl -fsS -H 'Content-Type: application/json' -d '{"email":"owner@example.com","password":"Password123"}' $B/auth/register > /dev/null
+          BOB_ID=$(curl -fsS -H 'Content-Type: application/json' -d '{"email":"bob@example.com","password":"Password123"}' $B/auth/register | json "['id']")
+          OWNER=$(curl -fsS -d 'username=owner@example.com&password=Password123' $B/auth/login | json "['access_token']")
+          BOB=$(curl -fsS -d 'username=bob@example.com&password=Password123' $B/auth/login | json "['access_token']")
+          PID=$(curl -fsS -H "Authorization: Bearer $OWNER" -H 'Content-Type: application/json' -d '{"name":"CI"}' $B/projects | json "['id']")
+          curl -fsS -H "Authorization: Bearer $OWNER" -H 'Content-Type: application/json' \
+            -d "{\"title\":\"Проверить CI\",\"assignee_id\":$BOB_ID,\"tags\":[\"ci\"]}" $B/projects/$PID/tasks
+          for i in $(seq 1 30); do
+            N=$(curl -fsS -H "Authorization: Bearer $BOB" $B/notifications | json ".__len__()")
+            [ "$N" -ge 2 ] && break   # приветствие + назначение задачи
+            sleep 2
+          done
+          curl -fsS -H "Authorization: Bearer $BOB" $B/notifications | tee notifications.json
+          grep -q 'Проверить CI' notifications.json
+
+      - name: Logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Stop services
+        if: always()
+        run: docker compose down -v
